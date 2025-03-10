@@ -31,6 +31,7 @@
 #include "misc.hh"
 #include <netdb.h>
 #include <sstream>
+#include <sys/un.h>
 
 #include "namespaces.hh"
 
@@ -86,6 +87,7 @@ union ComboAddress
 {
   sockaddr_in sin4{};
   sockaddr_in6 sin6;
+  sockaddr_un sinun;
 
   bool operator==(const ComboAddress& rhs) const
   {
@@ -198,7 +200,10 @@ union ComboAddress
     if (sin4.sin_family == AF_INET) {
       return sizeof(sin4);
     }
-    return sizeof(sin6);
+    if (sin6.sin6_family == AF_INET6) {
+      return sizeof(sin6);
+    }
+    return sizeof(sinun);
   }
 
   ComboAddress()
@@ -227,10 +232,16 @@ union ComboAddress
     setSockaddr(reinterpret_cast<const struct sockaddr*>(socketAddress), sizeof(struct sockaddr_in));
   };
 
+  ComboAddress(const struct sockaddr_un* socketAddress)
+  {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    setSockaddr(reinterpret_cast<const struct sockaddr*>(socketAddress), sizeof(struct sockaddr_un));
+  };
+
   void setSockaddr(const struct sockaddr* socketAddress, socklen_t salen)
   {
     if (salen > sizeof(struct sockaddr_in6)) {
-      throw PDNSException("ComboAddress can't handle other than sockaddr_in or sockaddr_in6");
+      throw PDNSException("ComboAddress can't handle other than sockaddr_in, sockaddr_in6 or sockaddr_un");
     }
     memcpy(this, socketAddress, salen);
   }
@@ -239,12 +250,16 @@ union ComboAddress
   explicit ComboAddress(const string& str, uint16_t port = 0)
   {
     memset(&sin6, 0, sizeof(sin6));
+    memset(&sinun, 0, sizeof(sinun));
     sin4.sin_family = AF_INET;
     sin4.sin_port = 0;
     if (makeIPv4sockaddr(str, &sin4) != 0) {
       sin6.sin6_family = AF_INET6;
       if (makeIPv6sockaddr(str, &sin6) < 0) {
-        throw PDNSException("Unable to convert presentation address '" + str + "'");
+        sinun.sun_family = AF_UNIX;
+        if (makeUNsockaddr(str, &sinun) < 0) {
+          throw PDNSException("Unable to convert presentation address '" + str + "'");
+        }
       }
     }
     if (sin4.sin_port == 0) { // 'str' overrides port!
@@ -259,6 +274,10 @@ union ComboAddress
   [[nodiscard]] bool isIPv4() const
   {
     return sin4.sin_family == AF_INET;
+  }
+  [[nodiscard]] bool isUnixSocket() const
+  {
+    return sin4.sin_family == AF_UNIX;
   }
 
   [[nodiscard]] bool isMappedIPv4() const
@@ -358,6 +377,9 @@ union ComboAddress
 
   [[nodiscard]] string toStringWithPort() const
   {
+    if (sinun.sun_family == AF_UNIX) {
+      return toString();
+    }
     if (sin4.sin_family == AF_INET) {
       return toString() + ":" + std::to_string(ntohs(sin4.sin_port));
     }
@@ -504,7 +526,10 @@ inline ComboAddress makeComboAddress(const string& str)
   if (inet_pton(AF_INET, str.c_str(), &address.sin4.sin_addr) <= 0) {
     address.sin4.sin_family = AF_INET6;
     if (makeIPv6sockaddr(str, &address.sin6) < 0) {
-      throw NetmaskException("Unable to convert '" + str + "' to a netmask");
+      address.sin4.sin_family = AF_UNIX;
+      if (makeUNsockaddr(str, &address.sinun) < 0) {
+        throw NetmaskException("Unable to convert '" + str + "' to a netmask");
+      }
     }
   }
   return address;
@@ -702,6 +727,11 @@ public:
   [[nodiscard]] bool isIPv4() const
   {
     return d_network.sin4.sin_family == AF_INET;
+  }
+
+  [[nodiscard]] bool isUnixSocket() const
+  {
+    return d_network.sinun.sun_family == AF_UNIX;
   }
 
   bool operator<(const Netmask& rhs) const
@@ -1467,6 +1497,9 @@ private:
     else if (value.isIPv6()) {
       node = d_root->right.get();
     }
+    else if (value.isUnixSocket()) {
+      node = d_root->left.get();
+    }
     else {
       throw NetmaskException("invalid address family");
     }
@@ -1766,6 +1799,11 @@ public:
   [[nodiscard]] bool isIPv6() const
   {
     return d_addr.isIPv6();
+  }
+
+  [[nodiscard]] bool isUnixSocket() const
+  {
+    return d_addr.isUnixSocket();
   }
 
   [[nodiscard]] AddressAndPortRange getNormalized() const
